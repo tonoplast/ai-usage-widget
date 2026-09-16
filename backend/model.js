@@ -8,7 +8,16 @@ const ADAPTERS = {
 };
 
 export async function getDetectedProviders() {
-  return detectProviders();
+  const detected = await detectProviders();
+  const config = readConfig(process.cwd());
+
+  if (config.claude_accounts.length > 0 && detected.includes("claude")) {
+    return detected.flatMap((p) =>
+      p === "claude" ? config.claude_accounts.map((a) => `claude:${a.label}`) : [p]
+    );
+  }
+
+  return detected;
 }
 
 export function getRefreshIntervalSec(projectRoot = process.cwd()) {
@@ -17,6 +26,10 @@ export function getRefreshIntervalSec(projectRoot = process.cwd()) {
 }
 
 export async function getProviderUsage(provider) {
+  if (provider.startsWith("claude:")) {
+    return getClaudeAccountUsage(provider);
+  }
+
   const loadAdapter = ADAPTERS[provider];
   if (!loadAdapter) {
     return {
@@ -39,6 +52,40 @@ export async function getProviderUsage(provider) {
       available: false,
       usage: null,
       status: "CLI detected; usage unavailable"
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      provider,
+      available: false,
+      usage: null,
+      status: `Error: ${message}`
+    };
+  }
+}
+
+async function getClaudeAccountUsage(provider) {
+  const label = provider.slice(7);
+  const config = readConfig(process.cwd());
+  const account = config.claude_accounts.find((a) => a.label === label);
+
+  if (!account) {
+    return {
+      provider,
+      available: false,
+      usage: null,
+      status: `Claude account "${label}" not found in config`
+    };
+  }
+
+  try {
+    const adapter = await ADAPTERS.claude();
+    const usage = await adapter({ cwd: getCliCwd(), configDir: account.config_dir, provider });
+    return usage ?? {
+      provider,
+      available: false,
+      usage: null,
+      status: "Claude Code CLI detected; usage unavailable"
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

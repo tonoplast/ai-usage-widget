@@ -20,11 +20,18 @@ export function runClaudeUsagePty(options = {}) {
     let usageCommandCount = 0;
     let dismissedDialogHandled = false;
     let trustPromptAccepted = false;
+    let trustConfirmed = false;
+    let trustNudgeAttempts = 0;
+    let trustSettleTimer = null;
+    let themePickerHandled = false;
     const eventLog = [];
     let child;
 
     try {
       const env = augmentPath({ ...process.env });
+      if (options.configDir && !isDefaultClaudeConfigDir(options.configDir)) {
+        env.CLAUDE_CONFIG_DIR = options.configDir;
+      }
       const launch = getProviderPtyLaunch("claude", "claude", env);
       preparePtyRuntime();
       child = pty.spawn(launch.file, launch.args, {
@@ -59,6 +66,7 @@ export function runClaudeUsagePty(options = {}) {
 
       settled = true;
       clearTimeout(timer);
+      clearTimeout(trustSettleTimer);
       usageRetryTimers.forEach(clearTimeout);
 
       await closePtyChild(child, eventLog, {
@@ -80,7 +88,8 @@ export function runClaudeUsagePty(options = {}) {
           rawOutput: output,
           cleanedOutput,
           failureReason,
-          eventLog
+          eventLog,
+          logSuffix: options.logSuffix
         })
       });
     };
@@ -98,6 +107,49 @@ export function runClaudeUsagePty(options = {}) {
       }
     }, delay));
 
+    const scheduleTrustCheck = () => {
+      clearTimeout(trustSettleTimer);
+      trustSettleTimer = setTimeout(() => {
+        if (settled || trustConfirmed) {
+          return;
+        }
+
+        const selection = currentTrustSelection(cleanTerminalOutput(output));
+        if (selection === "yes") {
+          trustConfirmed = true;
+          eventLog.push(`${timestamp()} EVENT confirm-trust-yes`);
+          try {
+            child.write("\r");
+          } catch {
+            // Let the normal timeout path report the failure.
+          }
+          return;
+        }
+
+        trustNudgeAttempts += 1;
+        if (trustNudgeAttempts > 5) {
+          // Give up nudging and accept whatever is currently selected rather
+          // than looping forever.
+          trustConfirmed = true;
+          eventLog.push(`${timestamp()} EVENT trust-selection-giveup`);
+          try {
+            child.write("\r");
+          } catch {
+            // Let the normal timeout path report the failure.
+          }
+          return;
+        }
+
+        eventLog.push(`${timestamp()} EVENT nudge-trust-selection`);
+        try {
+          child.write("\x1b[B");
+        } catch {
+          // Let the normal timeout path report the failure.
+        }
+        scheduleTrustCheck();
+      }, 150);
+    };
+
     child.onData((chunk) => {
       eventLog.push(`${timestamp()} DATA ${truncate(chunk.replace(/\r/g, "\\r").replace(/\n/g, "\\n"), 220)}`);
       output += chunk;
@@ -105,12 +157,23 @@ export function runClaudeUsagePty(options = {}) {
       if (!trustPromptAccepted && isTrustPrompt(output)) {
         trustPromptAccepted = true;
         eventLog.push(`${timestamp()} EVENT accept-trust-prompt`);
+        scheduleTrustCheck();
+        return;
+      }
+
+      if (trustPromptAccepted && !trustConfirmed) {
+        scheduleTrustCheck();
+        return;
+      }
+
+      if (!themePickerHandled && isThemePickerScreen(output)) {
+        themePickerHandled = true;
+        eventLog.push(`${timestamp()} EVENT dismiss-theme-picker`);
         try {
           child.write("\r");
         } catch {
           // Let the normal timeout path report the failure.
         }
-        return;
       }
 
       if (isReadyForUsageCommand(output) && !hasClaudeUsage(output) && usageCommandCount === 0) {
@@ -150,22 +213,49 @@ export function runClaudeUsagePty(options = {}) {
   });
 }
 
+function isDefaultClaudeConfigDir(dir) {
+  try {
+    return path.resolve(dir) === path.join(os.homedir(), ".claude");
+  } catch {
+    return false;
+  }
+}
+
 function isReadyForUsageCommand(output) {
   const cleaned = cleanTerminalOutput(output);
-  if (isTrustPrompt(output)) {
+  if (isTrustPrompt(output) || isThemePickerScreen(output)) {
     return false;
   }
 
-  return /Status\s+Config\s+Usage\s+Stats/i.test(cleaned)
+  return /Status\s*Config\s*Usage\s*Stats/i.test(cleaned)
     || (/Claude\s*Code/i.test(cleaned) && /\?\s*for\s*shortcuts/i.test(cleaned))
     || /❯\s*(?:Try|$)/i.test(cleaned)
     || />\s*(?:Try|$)/i.test(cleaned);
 }
 
+function isThemePickerScreen(output) {
+  const cleaned = cleanTerminalOutput(output);
+  return /choose\s*the\s*text\s*style/i.test(cleaned);
+}
+
 function isTrustPrompt(output) {
   const cleaned = cleanTerminalOutput(output);
-  return /do\s+you\s+trust\s+the\s+files\s+in\s+this\s+folder/i.test(cleaned)
-    || /enter\s+to\s+confirm\s+.*esc\s+to\s+cancel/i.test(cleaned);
+  if (isThemePickerScreen(output)) {
+    return false;
+  }
+
+  return /do\s*you\s*trust\s*the\s*files\s*in\s*this\s*folder/i.test(cleaned)
+    || /is\s*this\s*a\s*project\s*you\s*created\s*or\s*one\s*you\s*trust/i.test(cleaned)
+    || /enter\s*to\s*confirm/i.test(cleaned);
+}
+
+function currentTrustSelection(cleaned) {
+  const matches = [...cleaned.matchAll(/❯\s*(No|Yes)\b/gi)];
+  if (matches.length === 0) {
+    return null;
+  }
+
+  return matches[matches.length - 1][1].toLowerCase();
 }
 
 function hasClaudeUsage(output) {
@@ -220,11 +310,12 @@ function buildFailureReason(output, usageAttempted) {
   return `Unexpected output: ${cleaned.slice(0, 160)}`;
 }
 
-function writeDebugLog({ ok, rawOutput, cleanedOutput, failureReason, eventLog }) {
+function writeDebugLog({ ok, rawOutput, cleanedOutput, failureReason, eventLog, logSuffix }) {
   const logDir = path.join(os.tmpdir(), "ai-usage-widget");
   mkdirSync(logDir, { recursive: true });
 
-  const logPath = path.join(logDir, "claude-debug.log");
+  const fileName = logSuffix ? `claude-${logSuffix}-debug.log` : "claude-debug.log";
+  const logPath = path.join(logDir, fileName);
   const body = [
     `timestamp=${new Date().toISOString()}`,
     `ok=${ok}`,

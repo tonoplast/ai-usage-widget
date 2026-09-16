@@ -37,6 +37,10 @@ const PROVIDER_LABELS = {
 };
 
 export function providerLabel(provider) {
+  if (typeof provider === "string" && provider.startsWith("claude:")) {
+    return `Claude Code [${provider.slice(7)}] CLI`;
+  }
+
   return PROVIDER_LABELS[provider] ?? "CLI";
 }
 

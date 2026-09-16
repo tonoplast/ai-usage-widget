@@ -20,6 +20,7 @@ export function runCodexStatusPty(options = {}) {
     let settled = false;
     let statusAttempted = false;
     let trustPromptAccepted = false;
+    let updatePromptHandled = false;
     let readyTimer = null;
     let retryTimer = null;
     let settleTimer = null;
@@ -106,7 +107,17 @@ export function runCodexStatusPty(options = {}) {
       eventLog.push(`${timestamp()} DATA ${truncate(chunk.replace(/\r/g, "\\r").replace(/\n/g, "\\n"), 220)}`);
       output += chunk;
 
-      if (!trustPromptAccepted && isTrustPrompt(output)) {
+      if (!updatePromptHandled && isUpdatePrompt(output)) {
+        updatePromptHandled = true;
+        eventLog.push(`${timestamp()} EVENT skip-update-prompt`);
+        try {
+          child.write("\x1b[B\r");
+        } catch {
+          // Let the normal timeout path report the failure.
+        }
+      }
+
+      if (!trustPromptAccepted && !updatePromptHandled && isTrustPrompt(output)) {
         trustPromptAccepted = true;
         eventLog.push(`${timestamp()} EVENT accept-trust-prompt`);
         try {
@@ -185,8 +196,16 @@ function isReadyForStatusCommand(output) {
   return hasStableHeader && hasReadySignal;
 }
 
+function isUpdatePrompt(output) {
+  const screen = currentCodexScreen(output);
+  return /update\s+available/i.test(screen) && /skip/i.test(screen);
+}
+
 function isTrustPrompt(output) {
   const screen = currentCodexScreen(output);
+  if (isUpdatePrompt(output)) {
+    return false;
+  }
   return /do\s*you\s*trust\s*the\s*contents\s*of\s*this\s*directory/i.test(screen)
     || /press\s+enter\s+to\s+continue/i.test(screen);
 }

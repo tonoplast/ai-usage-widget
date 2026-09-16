@@ -4,20 +4,27 @@ import { parseClaudeUsage } from "../parser.js";
 import { readyProvider, stateFromFailureKind, unavailableProvider } from "../providerState.js";
 
 export async function getClaudeUsage(options = {}) {
-  const result = await runClaudeUsagePty({ timeoutMs: 30_000, cwd: options.cwd });
+  const providerName = options.provider ?? "claude";
+  const logSuffix = providerName !== "claude" ? providerName.replace(/[^a-z0-9]/gi, "-").toLowerCase() : undefined;
+  const result = await runClaudeUsagePty({
+    timeoutMs: 50_000,
+    cwd: options.cwd,
+    configDir: options.configDir,
+    logSuffix
+  });
 
   if (!result.ok) {
-    return summarizeClaudeFailure(result.stderr, result.debugLogPath);
+    return summarizeClaudeFailure(result.stderr, result.debugLogPath, providerName);
   }
 
   const usage = parseClaudeUsage(result.stdout);
-  return usage ? readyProvider("claude", usage) : summarizeClaudeFailure(result.stdout, result.debugLogPath);
+  return usage ? readyProvider(providerName, usage) : summarizeClaudeFailure(result.stdout, result.debugLogPath, providerName);
 }
 
-function summarizeClaudeFailure(message = "", logPath = "") {
+function summarizeClaudeFailure(message = "", logPath = "", providerName = "claude") {
   const normalized = String(message).trim();
   if (!normalized) {
-    return unavailableProvider("claude", "no_usage_capability", {
+    return unavailableProvider(providerName, "no_usage_capability", {
       status: "Claude Code CLI detected; /usage unavailable",
       logPath
     });
@@ -25,7 +32,7 @@ function summarizeClaudeFailure(message = "", logPath = "") {
 
   const classified = classifyCliFailure("claude", normalized);
   if (classified.kind !== "unavailable") {
-    return unavailableProvider("claude", stateFromFailureKind(classified.kind), {
+    return unavailableProvider(providerName, stateFromFailureKind(classified.kind), {
       status: classified.status,
       detail: normalized,
       logPath
@@ -33,7 +40,7 @@ function summarizeClaudeFailure(message = "", logPath = "") {
   }
 
   if (isClaudeSetupScreen(normalized)) {
-    return unavailableProvider("claude", "setup_required", {
+    return unavailableProvider(providerName, "setup_required", {
       status: "Claude Code CLI detected; setup required",
       detail: normalized,
       logPath
@@ -41,7 +48,7 @@ function summarizeClaudeFailure(message = "", logPath = "") {
   }
 
   if (/prompt not ready/i.test(normalized)) {
-    return unavailableProvider("claude", "prompt_not_ready", {
+    return unavailableProvider(providerName, "prompt_not_ready", {
       status: "Claude Code CLI detected; prompt not ready",
       detail: normalized,
       logPath
@@ -49,14 +56,14 @@ function summarizeClaudeFailure(message = "", logPath = "") {
   }
 
   if (/no output captured/i.test(normalized)) {
-    return unavailableProvider("claude", "no_output", {
+    return unavailableProvider(providerName, "no_output", {
       status: "Claude Code CLI detected; no /usage output",
       detail: normalized,
       logPath
     });
   }
 
-  return unavailableProvider("claude", "parse_error", {
+  return unavailableProvider(providerName, "parse_error", {
     status: "Claude Code CLI detected; unexpected output",
     detail: normalized,
     logPath

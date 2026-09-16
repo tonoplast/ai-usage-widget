@@ -11,6 +11,13 @@ const providerLabels: Record<string, string> = {
   claude: "Claude Code",
   gemini: "Gemini"
 };
+
+function getProviderLabel(provider: string): string {
+  if (provider.startsWith("claude:")) {
+    return `Claude Code [${provider.slice(7)}]`;
+  }
+  return providerLabels[provider] ?? provider;
+}
 const LATEST_RELEASE_URL = "https://api.github.com/repos/odrasile/ai-usage-widget/releases/latest";
 
 function defaultConfig(): AppConfig {
@@ -463,7 +470,7 @@ function renderProviderVisibilityControls(
     return `
       <label class="config-provider-toggle">
         <input class="config-provider-toggle__input" type="checkbox" data-provider="${escapeHtml(provider.provider)}" ${checked}>
-        <span>${escapeHtml(providerLabels[provider.provider] ?? provider.provider)}</span>
+        <span>${escapeHtml(getProviderLabel(provider.provider))}</span>
       </label>
     `;
   }).join("");
@@ -601,7 +608,7 @@ function renderProvider(provider: ProviderUsage, text: Messages, viewMode: ViewM
     
     item.innerHTML = `
       <div class="provider__top">
-        <strong>${providerLabels[provider.provider] ?? provider.provider}</strong>
+        <strong>${getProviderLabel(provider.provider)}</strong>
         <span>--</span>
       </div>
       <div class="limit-row">
@@ -643,7 +650,7 @@ function renderProvider(provider: ProviderUsage, text: Messages, viewMode: ViewM
 
   item.innerHTML = `
     <div class="provider__top">
-      <strong>${providerLabels[provider.provider] ?? provider.provider}</strong>${provider.stale ? '<span class="provider__badge" aria-hidden="true">!</span>' : ""}
+      <strong>${getProviderLabel(provider.provider)}</strong>${provider.stale ? '<span class="provider__badge" aria-hidden="true">!</span>' : ""}
     </div>
     ${primary}
     ${weekly}

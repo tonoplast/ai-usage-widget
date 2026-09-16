@@ -5,6 +5,7 @@ const UPDATE_REQUIRED_PATTERNS = [
   /upgrade required/i,
   /new version .* available/i,
   /version .* is available/i,
+  /update available/i,
   /out[- ]of[- ]date/i,
   /client .* out of date/i,
   /minimum supported version/i,

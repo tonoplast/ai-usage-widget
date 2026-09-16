@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_INTERVAL_SEC = 120;
@@ -11,13 +12,33 @@ export function readConfig(projectRoot = process.cwd()) {
     const refreshInterval = Number(config.refresh_interval_sec);
 
     return {
-      refresh_interval_sec: clampInterval(refreshInterval)
+      refresh_interval_sec: clampInterval(refreshInterval),
+      claude_accounts: parseClaudeAccounts(config.claude_accounts)
     };
   } catch {
     return {
-      refresh_interval_sec: DEFAULT_INTERVAL_SEC
+      refresh_interval_sec: DEFAULT_INTERVAL_SEC,
+      claude_accounts: []
     };
   }
+}
+
+function parseClaudeAccounts(accounts) {
+  if (!Array.isArray(accounts)) {
+    return [];
+  }
+
+  return accounts
+    .filter((a) => a && typeof a.label === "string" && a.label.trim() && typeof a.config_dir === "string")
+    .map((a) => ({ label: a.label.trim(), config_dir: expandTilde(a.config_dir) }));
+}
+
+function expandTilde(dir) {
+  if (dir === "~" || dir.startsWith("~/")) {
+    return path.join(os.homedir(), dir.slice(1));
+  }
+
+  return dir;
 }
 
 function clampInterval(value) {

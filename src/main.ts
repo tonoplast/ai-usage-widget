@@ -52,6 +52,7 @@ let hasCompletedInitialLayout = false;
 let suppressWindowStatePersistence = 0;
 let debugSequence = 0;
 let zoomPendingSync = 1.0;
+let autoScaleTimer = 0;
 
 const sessionBaselines = new Map<string, { primary?: number; weekly?: number }>();
 const soundAlertState = new Set<string>();
@@ -826,7 +827,100 @@ function setupWindowStatePersistence(): void {
 
   windowStatePersistenceReady = true;
   void currentWindow.onMoved(() => queueWindowStatePersist());
-  void currentWindow.onResized(() => queueWindowStatePersist());
+  void currentWindow.onResized(() => {
+    queueWindowStatePersist();
+    queueAutoScale();
+  });
+}
+
+function queueAutoScale(): void {
+  if (autoScaleTimer) {
+    window.clearTimeout(autoScaleTimer);
+  }
+
+  autoScaleTimer = window.setTimeout(() => {
+    void autoScaleToWindowSize();
+  }, 120);
+}
+
+// When the user drags the window to a new size, rescale the widget's
+// content (via the same zoom mechanism as manual Ctrl+scroll zoom) so
+// numbers and meter bars stay proportional instead of being clipped by
+// the window's `overflow: hidden`. Resizes we trigger ourselves (initial
+// restore, zoom-driven fit) are suppressed via suppressWindowStatePersistence
+// so this only reacts to genuine manual drags.
+async function autoScaleToWindowSize(): Promise<void> {
+  if (suppressWindowStatePersistence > 0) {
+    await logWindowDebug("autoScale:suppressed", {});
+    return;
+  }
+
+  const shell = appRoot.firstElementChild as HTMLElement | null;
+  if (!shell) {
+    return;
+  }
+
+  // .provider-list is its own `overflow: auto` scroll container (with a
+  // hidden scrollbar) nested inside the `flex: 1 1 auto; overflow: hidden`
+  // .widget__body, so its true content size never bubbles up into
+  // shell.scrollHeight — scroll containers stop that propagation at their
+  // own boundary. Substitute its real (unclipped) scroll size back into
+  // the shell measurement to get the content's true natural size.
+  //
+  // CSS `zoom` also rescales the used values that scrollWidth/scrollHeight
+  // report, and it does so non-linearly for percentage-sized ancestors
+  // (.widget/.widget__body are width/height: 100%), so dividing a
+  // currently-zoomed measurement by zoomLevel does not reliably recover the
+  // zoom=1 natural size. Probe at zoom 1 instead — synchronously, with no
+  // `await` in between, so nothing actually paints at the intermediate value.
+  const previousZoomStyle = document.documentElement.style.getPropertyValue("--widget-zoom");
+  if (zoomLevel !== 1) {
+    document.documentElement.style.setProperty("--widget-zoom", "1");
+  }
+
+  const scrollRegion = shell.querySelector<HTMLElement>(".provider-list") ?? shell.querySelector<HTMLElement>(".widget__body");
+  const naturalWidth = scrollRegion ? shell.scrollWidth - scrollRegion.clientWidth + scrollRegion.scrollWidth : shell.scrollWidth;
+  const naturalHeight = scrollRegion ? shell.scrollHeight - scrollRegion.clientHeight + scrollRegion.scrollHeight : shell.scrollHeight;
+
+  if (zoomLevel !== 1) {
+    document.documentElement.style.setProperty("--widget-zoom", previousZoomStyle);
+  }
+
+  if (naturalWidth <= 0 || naturalHeight <= 0) {
+    return;
+  }
+
+  const currentSize = await getCurrentLogicalInnerSize();
+  const fitZoom = Math.min(currentSize.width / naturalWidth, currentSize.height / naturalHeight);
+  const nextZoom = Math.max(0.5, Math.min(2.0, Math.round(fitZoom * 100) / 100));
+
+  await logWindowDebug("autoScale:measure", {
+    zoomLevel,
+    naturalWidth,
+    naturalHeight,
+    currentSize,
+    fitZoom,
+    nextZoom
+  });
+
+  if (!Number.isFinite(nextZoom) || Math.abs(nextZoom - zoomLevel) < 0.02) {
+    return;
+  }
+
+  zoomLevel = nextZoom;
+  applyZoomStyle();
+
+  try {
+    beginSuppressWindowStatePersistence();
+    await currentWindow.setMinSize(new LogicalSize(minWindowWidth(), minWindowHeight()));
+    lastAppliedMinSize = `${minWindowWidth()}x${minWindowHeight()}`;
+  } catch (error) {
+    console.error("Unable to update widget minimum size", error);
+  } finally {
+    endSuppressWindowStatePersistenceSoon();
+  }
+
+  queueWindowStatePersist();
 }
 
 function queueWindowStatePersist(): void {
